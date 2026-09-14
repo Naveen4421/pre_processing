@@ -5,6 +5,11 @@ __pycache__/
 input/*
 output/*
 
+webapp/uploads/*
+webapp/outputs/*
+!webapp/uploads/.gitkeep
+!webapp/outputs/.gitkeep
+
 *.png
 *.jpg
 *.jpeg
