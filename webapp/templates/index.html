@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Kannada OCR Preprocessing - Dev Lab</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Kannada OCR Preprocessing Lab</h1>
+      <p style="color: var(--dim); font-size: 13px;">Non-destructive document quality gate & transformation inspector</p>
+    </div>
+    {% if session_id %}
+      <div>
+        <a href="/" class="btn btn-secondary">Upload New File</a>
+      </div>
+    {% endif %}
+  </header>
+
+  <section class="card">
+    <h2>Upload Document / Image</h2>
+    <form action="/upload" method="POST" enctype="multipart/form-data">
+      <div class="form-row">
+        <input type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.pnm" required>
+        <input type="text" name="force_ops" placeholder="Force ops (e.g. deskew,contrast) or leave blank for Quality Gate">
+        <button type="submit">Run Preprocessing</button>
+      </div>
+      <p class="help-text">Supported: PDF, PNG, JPG, JPEG, TIF, TIFF, BMP, PNM. Leave 'Force ops' empty to use the automated quality gate.</p>
+    </form>
+  </section>
+
+  {% if session_id and manifest %}
+    <section class="top-bar">
+      <div>
+        <strong style="font-size: 16px;">{{ manifest.source }}</strong>
+        <span style="color: var(--dim); margin-left: 12px;">{{ manifest.pages | length }} page(s)</span>
+        <span style="margin-left: 14px; font-weight: 600;">
+          <span style="color: var(--pre);">{{ n_preprocessed }} preprocessed</span> /
+          <span style="color: var(--keep);">{{ n_kept }} kept original</span>
+        </span>
+      </div>
+      <div>
+        <a href="/session/{{ session_id }}/manifest.json" class="btn btn-secondary" download>Download manifest.json</a>
+      </div>
+    </section>
+
+    <main class="gallery-grid">
+      {% for page in manifest.pages %}
+        <a href="/session/{{ session_id }}/page/{{ page.page_index }}" class="thumb-card">
+          <div class="thumb-wrap">
+            <img src="/session/{{ session_id }}/img/thumb/{{ page.page_index }}" alt="Page {{ page.page_index }}" loading="lazy">
+            <span class="badge thumb-badge {{ 'badge-keep' if page.decision == 'KEEP' else 'badge-pre' }}">
+              {{ page.decision }}
+            </span>
+          </div>
+          <div class="thumb-info">
+            <div class="filename">p.{{ page.page_index }}: {{ page.output }}</div>
+            <div class="ops">ops={{ page.operations | join(',') if page.operations else 'none' }}</div>
+          </div>
+        </a>
+      {% endfor %}
+    </main>
+  {% endif %}
+</body>
+</html>

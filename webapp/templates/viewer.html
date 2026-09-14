@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Page {{ page_n }} - {{ manifest.source }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <div>
+      <a href="/session/{{ session_id }}">← Back to Gallery</a>
+      <h2 style="display: inline-block; margin-left: 16px;">Page {{ page_n }} / {{ total_pages }}</h2>
+      <span style="color: var(--dim); margin-left: 10px;">({{ page.output }})</span>
+    </div>
+    <div class="viewer-controls">
+      {% if page_n > 1 %}
+        <a href="/session/{{ session_id }}/page/{{ page_n - 1 }}" class="btn btn-secondary" id="btn-prev">← Prev</a>
+      {% endif %}
+      {% if page_n < total_pages %}
+        <a href="/session/{{ session_id }}/page/{{ page_n + 1 }}" class="btn btn-secondary" id="btn-next">Next →</a>
+      {% endif %}
+      <span style="border-left: 1px solid var(--line); height: 24px; margin: 0 4px;"></span>
+      <button type="button" class="btn btn-secondary mode-btn active" data-mode="side">1: Side-by-Side</button>
+      <button type="button" class="btn btn-secondary mode-btn" data-mode="overlay">2: Overlay</button>
+      <button type="button" class="btn btn-secondary mode-btn" data-mode="blink">3: Blink</button>
+      <button type="button" class="btn btn-secondary mode-btn" data-mode="proc-only">4: Processed Only</button>
+    </div>
+  </header>
+
+  <main id="compare-box" class="compare-container">
+    <div id="raw-pane" class="img-pane">
+      <div class="pane-label">Raw (Original)</div>
+      <img id="raw-img" src="/session/{{ session_id }}/img/raw/{{ page_n }}" alt="Raw Page {{ page_n }}">
+    </div>
+    <div id="proc-pane" class="img-pane">
+      <div class="pane-label">Processed</div>
+      <img id="proc-img" src="/session/{{ session_id }}/img/processed/{{ page_n }}?t={{ cache_bust }}" alt="Processed Page {{ page_n }}">
+    </div>
+  </main>
+
+  <section class="details-grid">
+    <div class="card">
+      <h3>Quality Assessment & Decision</h3>
+      <div style="margin: 12px 0;">
+        <span class="badge {{ 'badge-keep' if page.decision == 'KEEP' else 'badge-pre' }}" style="font-size: 14px; padding: 4px 12px;">
+          {{ page.decision }}
+        </span>
+      </div>
+      <p style="font-size: 14px; margin-bottom: 8px;">
+        <strong>Applied operations:</strong>
+        <code>{{ page.operations | join(', ') if page.operations else 'none' }}</code>
+      </p>
+      <p style="font-size: 13px; color: var(--dim);">Dimensions: {{ page.width }} × {{ page.height }} px</p>
+
+      <div style="margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px;">
+        <h3>A/B Testing: Re-run with Custom Ops</h3>
+        <form method="POST" action="/session/{{ session_id }}/page/{{ page_n }}/rerun" class="rerun-form">
+          <input type="text" id="rerun-ops" name="ops" value="{{ page.operations | join(',') }}" placeholder="e.g. deskew,illumination,contrast">
+          <button type="submit">Re-run Page</button>
+        </form>
+        <p class="help-text">Valid ops: deskew, illumination, denoise, contrast, sharpen. Leave blank to force KEEP original.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Quality Gate Metrics</h3>
+      <table class="metrics-table">
+        <tbody>
+          <tr><th>Skew Angle</th><td>{{ page.metrics.skew_deg }}°</td></tr>
+          <tr><th>Blur Score (Laplacian)</th><td>{{ page.metrics.blur }}</td></tr>
+          <tr><th>Contrast Score (Std Dev)</th><td>{{ page.metrics.contrast }}</td></tr>
+          <tr><th>Illumination Score</th><td>{{ page.metrics.illumination }}</td></tr>
+          <tr><th>Noise Score</th><td>{{ page.metrics.noise }}</td></tr>
+        </tbody>
+      </table>
+      <p class="help-text" style="margin-top: 14px;">Shortcuts: [← / →] Prev/Next page &nbsp;|&nbsp; [1 - 4] Switch view modes</p>
+    </div>
+  </section>
+
+  <script>
+    (function() {
+      const box = document.getElementById('compare-box');
+      const modeButtons = document.querySelectorAll('.mode-btn');
+      let blinkInterval = null;
+
+      function setMode(mode) {
+        if (blinkInterval) {
+          clearInterval(blinkInterval);
+          blinkInterval = null;
+        }
+        box.className = 'compare-container';
+        modeButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.mode === mode));
+
+        if (mode === 'overlay') {
+          box.classList.add('mode-overlay');
+        } else if (mode === 'proc-only') {
+          box.classList.add('mode-processed-only');
+        } else if (mode === 'blink') {
+          box.classList.add('mode-blink', 'show-raw');
+          let showRaw = true;
+          blinkInterval = setInterval(() => {
+            showRaw = !showRaw;
+            box.classList.toggle('show-raw', showRaw);
+            box.classList.toggle('show-proc', !showRaw);
+          }, 600);
+        }
+      }
+
+      modeButtons.forEach(btn => {
+        btn.addEventListener('click', () => setMode(btn.dataset.mode));
+      });
+
+      document.addEventListener('keydown', (e) => {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+        if (e.key === 'ArrowLeft') {
+          const prev = document.getElementById('btn-prev');
+          if (prev) prev.click();
+        } else if (e.key === 'ArrowRight') {
+          const next = document.getElementById('btn-next');
+          if (next) next.click();
+        } else if (e.key === '1') {
+          setMode('side');
+        } else if (e.key === '2') {
+          setMode('overlay');
+        } else if (e.key === '3') {
+          setMode('blink');
+        } else if (e.key === '4') {
+          setMode('proc-only');
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
