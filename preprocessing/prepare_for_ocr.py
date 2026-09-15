@@ -130,6 +130,7 @@ def prepare_page(
         processed = preprocess_page(
             image,
             skew_angle=q.skew_angle,
+            orientation_angle=q.orientation_angle,
             operations=ops,
         )
         decision = "PREPROCESS"
@@ -144,6 +145,7 @@ def prepare_page(
     height, width = processed.shape[:2]
     metrics = {
         "skew_deg": float(q.skew_angle),
+        "orientation_deg": int(q.orientation_angle),
         "blur": float(q.blur_score),
         "contrast": float(q.contrast_score),
         "illumination": float(q.illumination_score),

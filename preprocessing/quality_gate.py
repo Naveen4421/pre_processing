@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -16,6 +20,7 @@ class PageQuality:
     skew_angle: float
     illumination_score: float
     noise_score: float
+    orientation_angle: int
 
     needs_preprocessing: bool
     operations: list[str]
@@ -98,6 +103,47 @@ def detect_skew_angle(gray: np.ndarray) -> float:
     )
 
 
+def detect_orientation(gray: np.ndarray) -> int:
+    """
+    Detect gross page rotation (0/90/180/270 degrees) via Tesseract's
+    Orientation & Script Detection (OSD) mode.
+
+    OSD only reports geometric orientation metadata; it does not perform
+    text recognition. Returns the clockwise rotation (in degrees) needed to
+    make the page upright, or 0 if tesseract is unavailable or orientation
+    cannot be determined confidently (e.g. too little text on the page).
+    """
+    tess = shutil.which("tesseract")
+    if not tess:
+        return 0
+
+    with tempfile.TemporaryDirectory(prefix="osd_") as td:
+        img_path = Path(td) / "page.png"
+        if not cv2.imwrite(str(img_path), gray):
+            return 0
+
+        res = subprocess.run(
+            [tess, str(img_path), "stdout", "--psm", "0"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if res.returncode != 0:
+            return 0
+
+        for line in res.stdout.splitlines():
+            if line.startswith("Rotate:"):
+                try:
+                    rotate = int(line.split(":")[1].strip())
+                except ValueError:
+                    return 0
+                if rotate in (0, 90, 180, 270):
+                    return rotate
+                return 0
+
+    return 0
+
+
 def calculate_illumination_score(
     gray: np.ndarray,
 ) -> float:
@@ -154,16 +200,23 @@ def decide_operations(
     illumination_score: float,
     noise_score: float,
     needs_crop: bool = False,
+    orientation_angle: int = 0,
 ) -> list[str]:
 
     operations = []
+
+    # Gross page rotation (90/180/270) must be corrected before crop/deskew,
+    # which only handle fine geometry.
+    if orientation_angle:
+        operations.append("orientation")
 
     # If camera capture includes foreign background (table, cloth), crop first
     if needs_crop:
         operations.append("crop")
 
-    # Tuned thresholds for real Kannada document & book scans
-    if abs(skew_angle) > 1.5:
+    # Tuned thresholds for real Kannada document & book scans.
+    # Correct even slight skew (as low as ~1 degree) so text baselines stay level.
+    if abs(skew_angle) > 0.5:
         operations.append("deskew")
 
     if illumination_score > 18:
@@ -239,6 +292,10 @@ def assess_page(
         gray
     )
 
+    orientation_angle = detect_orientation(
+        gray
+    )
+
     operations = decide_operations(
         blur_score=blur_score,
         contrast_score=contrast_score,
@@ -246,6 +303,7 @@ def assess_page(
         illumination_score=illumination_score,
         noise_score=noise_score,
         needs_crop=needs_crop,
+        orientation_angle=orientation_angle,
     )
 
     return PageQuality(
@@ -277,6 +335,8 @@ def assess_page(
             noise_score,
             2
         ),
+
+        orientation_angle=orientation_angle,
 
         needs_preprocessing=(
             len(operations) > 0
@@ -332,6 +392,11 @@ def assess_image_file(
     print(
         f"Skew         : "
         f"{result.skew_angle}°"
+    )
+
+    print(
+        f"Orientation  : "
+        f"{result.orientation_angle}° (rotation needed)"
     )
 
     print(

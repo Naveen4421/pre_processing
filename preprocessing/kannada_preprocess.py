@@ -6,25 +6,30 @@ specifically for Indic scripts like Kannada, where character stroke integrity,
 subscript consonants (ottu/vatlu), and vowel signs (matras) must be preserved.
 
 Transformation Pipeline Order:
-    OP_ORDER = ["crop", "deskew", "illumination", "denoise", "contrast", "sharpen"]
+    OP_ORDER = ["orientation", "crop", "deskew", "illumination", "denoise", "contrast", "sharpen"]
 
 Why this specific execution order is required:
-1. crop first:
+1. orientation first:
+   Gross page rotation (90/180/270 degrees, e.g. a book photographed sideways
+   or upside down) must be corrected before every other step, since crop's
+   document-quad detection and deskew's line-angle detection both assume the
+   page is already close to upright.
+2. crop second:
    Non-document backgrounds (table surfaces, cloth, shadows, camera margins)
    must be excised before geometry correction and illumination normalization,
    ensuring subsequent filters only analyze the actual page content.
-2. deskew second:
+3. deskew third:
    Geometric alignment must occur before spatial filtering or intensity
    transformations so that coordinate spaces and orientation are normalized.
-3. illumination before contrast:
+4. illumination before contrast:
    Large-scale background lighting gradients and book-fold shadows must be
    flattened before local histogram equalization; otherwise, CLAHE amplifies
    the background illumination unevenness into dark/blown-out regions.
-4. denoise before contrast:
+5. denoise before contrast:
    High-frequency scanner and paper grain must be smoothed (using an
    edge-preserving bilateral filter) prior to contrast enhancement; otherwise,
    CLAHE intensifies background noise.
-5. sharpen last:
+6. sharpen last:
    High-frequency edge enhancement (unsharp masking) must run at the very end;
    running it earlier would amplify noise and contrast artifacts across
    subsequent stages.
@@ -36,6 +41,7 @@ import cv2
 import numpy as np
 
 OP_ORDER: list[str] = [
+    "orientation",
     "crop",
     "deskew",
     "illumination",
@@ -117,6 +123,25 @@ def find_document_quad(image: np.ndarray) -> tuple[np.ndarray | None, float]:
             return corners, area_ratio
 
     return None, 0.0
+
+
+def rotate_orientation(image: np.ndarray, angle: int) -> np.ndarray:
+    """
+    Correct gross page rotation by a clockwise multiple of 90 degrees.
+
+    Unlike `deskew` (which nudges a nearly-upright page by a few degrees),
+    this handles a page captured sideways or upside down. `angle` is the
+    clockwise rotation needed to make the page upright, as produced by
+    `quality_gate.detect_orientation`. No-op for angle 0 or any value that
+    isn't a multiple of 90.
+    """
+    if angle == 90:
+        return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    if angle == 180:
+        return cv2.rotate(image, cv2.ROTATE_180)
+    if angle == 270:
+        return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return image.copy()
 
 
 def crop(image: np.ndarray) -> np.ndarray:
@@ -251,6 +276,7 @@ def sharpen(image: np.ndarray, amount: float = 0.8) -> np.ndarray:
 def preprocess_page(
     image: np.ndarray,
     skew_angle: float = 0.0,
+    orientation_angle: int = 0,
     operations: list[str] | None = None,
 ) -> np.ndarray:
     """
@@ -271,7 +297,9 @@ def preprocess_page(
         if op not in operations:
             continue
 
-        if op == "crop":
+        if op == "orientation":
+            result = rotate_orientation(result, orientation_angle)
+        elif op == "crop":
             result = crop(result)
         elif op == "deskew":
             result = deskew(result, skew_angle)

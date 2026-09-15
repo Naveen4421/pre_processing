@@ -1,14 +1,17 @@
 """
-Kannada OCR Preprocessing Development & Inspection Web Application.
+Kannada Document Preprocessing Development & Inspection Web Application.
 
 A lightweight Flask tool for developers to upload PDF and image scans, inspect
 automated quality gate assessments and non-destructive transformations page-by-page,
-and perform interactive A/B testing with custom operation overrides.
+and perform interactive A/B testing with custom operation overrides. Produces
+OCR-ready images and a manifest for a downstream OCR stage; OCR itself is out
+of scope here.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -26,7 +29,6 @@ from preprocessing.prepare_for_ocr import (
     get_pdf_page_count,
     prepare_document,
     prepare_page,
-    run_page_ocr,
 )
 from preprocessing.quality_gate import assess_page
 
@@ -111,8 +113,8 @@ def _make_thumbnail(src_path: Path, thumb_path: Path, target_width: int = 240) -
     cv2.imwrite(str(thumb_path), thumb)
 
 
-def _process_single_page(session_id: str, page_n: int, run_ocr: bool = True) -> dict:
-    """Extract, preprocess, and run OCR on a single page for a session."""
+def _process_single_page(session_id: str, page_n: int, run_ocr: bool = False) -> dict:
+    """Extract and preprocess a single page for a session (OCR disabled)."""
     s_id = _validate_uuid(session_id)
     manifest = _load_manifest(s_id)
     if not manifest:
@@ -156,7 +158,6 @@ def _process_single_page(session_id: str, page_n: int, run_ocr: bool = True) -> 
         force_ops=force_ops,
         source_label=str(upload_path),
         run_ocr=run_ocr,
-        ocr_lang="kan",
     )
 
     thumb_path = thumbs_dir / out_filename
@@ -179,7 +180,7 @@ def _process_single_page(session_id: str, page_n: int, run_ocr: bool = True) -> 
 
 
 def _stream_worker(session_id: str):
-    """Background worker that continuously preprocesses pending pages and dispatches to OCR."""
+    """Background worker that continuously preprocesses pending pages."""
     with _STREAM_LOCK:
         if _ACTIVE_STREAMS.get(session_id):
             return
@@ -199,7 +200,7 @@ def _stream_worker(session_id: str):
                 break
             next_page = pending[0]
             try:
-                _process_single_page(session_id, next_page, run_ocr=True)
+                _process_single_page(session_id, next_page, run_ocr=False)
             except Exception as err:
                 print(f"Background streaming error on page {next_page}: {err}")
                 break
@@ -209,7 +210,7 @@ def _stream_worker(session_id: str):
 
 
 def _start_background_stream(session_id: str):
-    """Launch background daemon thread for sequential page-by-page preprocessing & OCR."""
+    """Launch background daemon thread for sequential page-by-page preprocessing."""
     t = threading.Thread(target=_stream_worker, args=(session_id,), daemon=True)
     t.start()
 
@@ -280,8 +281,7 @@ def upload():
             page_index=1,
             force_ops=force_ops,
             source_label=str(upload_path),
-            run_ocr=True,
-            ocr_lang="kan",
+            run_ocr=False,
         )
         _make_thumbnail(p1_out, thumbs_dir / p1_out_filename, target_width=240)
 
@@ -321,7 +321,7 @@ def upload():
         }
         _save_manifest(session_id, manifest_data)
 
-        # Start continuous background streaming: Page 1 is ready, Pages 2..N are processed & sent to OCR
+        # Start continuous background streaming: Page 1 is ready, Pages 2..N are processed on-demand
         _start_background_stream(session_id)
 
     else:
@@ -333,8 +333,7 @@ def upload():
             dpi=300,
             force_ops=force_ops,
             verbose=False,
-            run_ocr=True,
-            ocr_lang="kan",
+            run_ocr=False,
         )
         orig_manifest = _get_manifest_path(out_dir)
         std_manifest = out_dir / "manifest.json"
@@ -346,7 +345,7 @@ def upload():
 
 @app.route("/session/<uuid:session_id>/status")
 def session_status(session_id):
-    """Return JSON status of the background streaming and OCR pipeline."""
+    """Return JSON status of the background streaming pipeline."""
     s_id = str(session_id)
     manifest = _load_manifest(s_id)
     if not manifest:
@@ -473,13 +472,16 @@ def rerun_page(session_id, page_n):
     if raw_img is None:
         abort(500, description="Could not load raw page image")
 
-    # Assess quality for angle parameter
+    # Assess quality for angle parameters
     q = assess_page(raw_img)
 
     # Conditionally execute requested operations
     if ops:
         processed = preprocess_page(
-            raw_img, skew_angle=q.skew_angle, operations=ops
+            raw_img,
+            skew_angle=q.skew_angle,
+            orientation_angle=q.orientation_angle,
+            operations=ops,
         )
         decision = "PREPROCESS"
     else:
@@ -492,11 +494,6 @@ def rerun_page(session_id, page_n):
     if not cv2.imwrite(str(out_path), processed):
         abort(500, description="Failed to overwrite processed page image")
 
-    # Run OCR on updated processed image
-    ocr_text = run_page_ocr(out_path, lang="kan")
-    txt_path = out_path.with_suffix(".txt")
-    txt_path.write_text(ocr_text, encoding="utf-8")
-
     # Invalidate thumbnail cache so gallery updates
     thumb_path = OUTPUTS_DIR / s_id / "thumbs" / out_filename
     if thumb_path.is_file():
@@ -507,7 +504,6 @@ def rerun_page(session_id, page_n):
     page_entry["operations"] = ops
     page_entry["width"] = int(processed.shape[1])
     page_entry["height"] = int(processed.shape[0])
-    page_entry["ocr_text"] = ocr_text
     _save_manifest(s_id, manifest)
 
     return redirect(url_for("page_viewer", session_id=s_id, page_n=page_n))
@@ -584,4 +580,8 @@ def download_manifest(session_id):
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(
+        host=os.environ.get("HOST", "127.0.0.1"),
+        port=int(os.environ.get("PORT", 5000)),
+        debug=os.environ.get("FLASK_DEBUG", "1") == "1",
+    )

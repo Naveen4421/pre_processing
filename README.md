@@ -27,6 +27,7 @@ This project introduces a **Quality Gate Architecture**:
                                      ▼
         ┌─────────────────────────────────────────────────────────┐
         │                 Quality Gate Assessment                 │
+        │  • Orientation (Tesseract OSD, 0/90/180/270)             │
         │  • Blur (Laplacian Variance)                            │
         │  • Contrast (Std Dev)                                   │
         │  • Skew (Hough Transform Angle)                         │
@@ -40,12 +41,13 @@ This project introduces a **Quality Gate Architecture**:
                       ▼                        ▼
              Preserve Original        Selective Transformations
              (Byte Passthrough)       (Fixed Safe Order)
-                                      1. crop
-                                      2. deskew
-                                      3. illumination
-                                      4. denoise
-                                      5. contrast
-                                      6. sharpen
+                                      1. orientation
+                                      2. crop
+                                      3. deskew
+                                      4. illumination
+                                      5. denoise
+                                      6. contrast
+                                      7. sharpen
                       │                        │
                       └──────────────┬─────────┘
                                      ▼
@@ -56,14 +58,15 @@ This project introduces a **Quality Gate Architecture**:
 
 ### Why Operations Run in a Fixed Safe Order
 
-`OP_ORDER = ["crop", "deskew", "illumination", "denoise", "contrast", "sharpen"]`
+`OP_ORDER = ["orientation", "crop", "deskew", "illumination", "denoise", "contrast", "sharpen"]`
 
-1. **`crop` first**: Non-document backgrounds (table surfaces, cloth, shadows, camera margins) must be excised before geometry correction and illumination normalization, ensuring subsequent filters only analyze the actual page content.
-2. **`deskew` second**: Geometric orientation must be corrected before spatial filtering and intensity mapping so that coordinate spaces and orientation are normalized.
-3. **`illumination` before `contrast`**: Large-scale background gradients and book-fold shadows must be flattened before local equalization; otherwise, CLAHE amplifies background unevenness into dark or blown-out patches.
-4. **`denoise` before `contrast`**: Paper and sensor grain must be smoothed (via an edge-preserving bilateral filter) before contrast stretching to prevent noise amplification.
-5. **`contrast`**: CLAHE improves local character contrast while guarding thin strokes.
-6. **`sharpen` last**: Unsharp masking must run at the very end; executing it earlier would accentuate high-frequency noise throughout prior stages.
+1. **`orientation` first**: Gross page rotation (90/180/270 degrees — e.g. a book photographed sideways or upside down) must be corrected before every other step, since crop's document-quad detection and deskew's line-angle detection both assume the page is already close to upright.
+2. **`crop` second**: Non-document backgrounds (table surfaces, cloth, shadows, camera margins) must be excised before geometry correction and illumination normalization, ensuring subsequent filters only analyze the actual page content.
+3. **`deskew` third**: Fine geometric skew must be corrected before spatial filtering and intensity mapping so that coordinate spaces and orientation are normalized.
+4. **`illumination` before `contrast`**: Large-scale background gradients and book-fold shadows must be flattened before local equalization; otherwise, CLAHE amplifies background unevenness into dark or blown-out patches.
+5. **`denoise` before `contrast`**: Paper and sensor grain must be smoothed (via an edge-preserving bilateral filter) before contrast stretching to prevent noise amplification.
+6. **`contrast`**: CLAHE improves local character contrast while guarding thin strokes.
+7. **`sharpen` last**: Unsharp masking must run at the very end; executing it earlier would accentuate high-frequency noise throughout prior stages.
 
 ---
 
@@ -73,8 +76,9 @@ The quality gate evaluates images using OpenCV and decides which corrective acti
 
 | Metric | Measurement Technique | Threshold Condition | Triggered Operation | Description |
 | :--- | :--- | :--- | :--- | :--- |
+| **Orientation** | Tesseract Orientation & Script Detection (`--psm 0`) — detects rotation only, extracts no text | `orientation_angle in {90, 180, 270}` | `orientation` | Rotates the whole page by 90/180/270 degrees (`cv2.rotate`) to correct a sideways or upside-down capture, before any other geometry step runs. |
 | **Boundary Crop** | Canny edges + morphological dilation + 4-point polygon approximation (`approxPolyDP`) | Detected document quad with $0.20 \le \text{area ratio} < 0.95$ | `crop` | Dynamically trims foreign background (table, cloth, shadows) and applies 4-point perspective rectification. Flatbed scans remain 100% untouched. |
-| **Skew** | Canny edges + Probabilistic Hough Lines (`HoughLinesP`) filtering $\pm 15^\circ$ | `abs(skew_angle) > 1.5°` | `deskew` | Rotates image around center with `INTER_CUBIC` and clean white border padding keeping canvas size. |
+| **Skew** | Canny edges + Probabilistic Hough Lines (`HoughLinesP`) filtering $\pm 15^\circ$ | `abs(skew_angle) > 0.5°` | `deskew` | Rotates image around center with `INTER_CUBIC` and clean white border padding keeping canvas size. Catches even slight skew (~1°) so text baselines stay level. |
 | **Illumination** | Downsampled Gaussian blur standard deviation | `illumination_score > 18.0` | `illumination` | Gaussian-division background normalization (`sigmaX=35`) to remove lighting gradients. |
 | **Noise** | High-frequency residual mean (`cv2.absdiff` with $3\times3$ blur) | `noise_score > 8.0` | `denoise` | Bilateral filter (`d=7, sigma=35`) preserving character edges without destroying *matras*. |
 | **Blur** | Variance of the Laplacian (`cv2.Laplacian`) | `blur_score < 600.0` | `sharpen` | Unsharp mask (`sigma=1.0, amount=0.8`) to restore soft text without halo artifacts. |
@@ -116,10 +120,15 @@ The quality gate evaluates images using OpenCV and decides which corrective acti
 
 ### Prerequisites
 - **Python**: 3.10 or higher
-- **System Utilities** (for PDF rasterization):
-  - Ubuntu/Debian: `sudo apt install poppler-utils`
-  - macOS (Homebrew): `brew install poppler`
-  - Arch Linux: `sudo pacman -S poppler`
+- **System Utilities**:
+  - `poppler-utils` — PDF rasterization (`pdftoppm`/`pdfinfo`)
+    - Ubuntu/Debian: `sudo apt install poppler-utils`
+    - macOS (Homebrew): `brew install poppler`
+    - Arch Linux: `sudo pacman -S poppler`
+  - `tesseract-ocr` — used **only** for Orientation & Script Detection (`--psm 0`) to auto-correct 90/180/270 degree page rotation. No text recognition/OCR is performed by this pipeline; no language packs are required.
+    - Ubuntu/Debian: `sudo apt install tesseract-ocr`
+    - macOS (Homebrew): `brew install tesseract`
+    - Arch Linux: `sudo pacman -S tesseract`
 
 ### Environment Setup
 
@@ -221,6 +230,7 @@ output/book/
       ],
       "metrics": {
         "skew_deg": -3.95,
+        "orientation_deg": 0,
         "blur": 4030.3,
         "contrast": 76.85,
         "illumination": 11.9,
@@ -342,6 +352,7 @@ if quality.needs_preprocessing:
     cleaned = preprocess_page(
         image,
         skew_angle=quality.skew_angle,
+        orientation_angle=quality.orientation_angle,
         operations=quality.operations,
     )
 else:

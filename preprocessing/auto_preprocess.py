@@ -58,6 +58,7 @@ def process_one(
         processed = preprocess_page(
             image,
             skew_angle=quality.skew_angle,
+            orientation_angle=quality.orientation_angle,
             operations=quality.operations,
         )
         if verbose:

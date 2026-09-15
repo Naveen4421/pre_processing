@@ -1,0 +1,10 @@
+services:
+  preprocessing:
+    build: .
+    ports:
+      - "2500:5000"
+    volumes:
+      - ./webapp/uploads:/app/webapp/uploads
+      - ./webapp/outputs:/app/webapp/outputs
+    environment:
+      - FLASK_DEBUG=0
