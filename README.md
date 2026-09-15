@@ -176,6 +176,9 @@ Prepares a PDF document or single image for downstream OCR engines (such as Tess
 # Process a PDF document at 300 DPI (page-by-page streaming)
 python -m preprocessing.prepare_for_ocr book.pdf output/book/ --dpi 300
 
+# Stream each page directly into OCR (Tesseract Kannada) as soon as it is preprocessed
+python -m preprocessing.prepare_for_ocr book.pdf output/book/ --ocr
+
 # Process only a single page from a large multi-page PDF
 python -m preprocessing.prepare_for_ocr book.pdf output/book/ --page 1
 
@@ -315,15 +318,23 @@ from preprocessing.prepare_for_ocr import prepare_document, prepare_page
 from preprocessing.quality_gate import assess_page
 from preprocessing.kannada_preprocess import preprocess_page
 
-# 1. High-level document preparation (generates normalized pages + manifest)
+# 1. Pipelined streaming: Each page is delivered to downstream OCR the instant it finishes
+from preprocessing.prepare_for_ocr import stream_prepare_document
+
+for page_manifest in stream_prepare_document("book.pdf", "output/book", run_ocr=True):
+    print(f"Page {page_manifest.page_index} preprocessed & OCR'd: {page_manifest.decision}")
+    # Downstream consumers receive page 1 immediately without waiting for the full book!
+
+# 2. High-level document preparation (generates normalized pages + manifest)
 manifest = prepare_document(
     src="book.pdf",
     out_dir="output/book",
     dpi=300,
+    run_ocr=True,
 )
 print(f"Prepared {len(manifest.pages)} pages: {manifest.n_preprocessed} preprocessed, {manifest.n_kept} kept original.")
 
-# 2. In-memory page assessment & selective preprocessing
+# 3. In-memory page assessment & selective preprocessing
 image = cv2.imread("input/page001.png", cv2.IMREAD_GRAYSCALE)
 quality = assess_page(image)
 

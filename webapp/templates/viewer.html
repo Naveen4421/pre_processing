@@ -79,10 +79,55 @@
       </table>
       <p class="help-text" style="margin-top: 14px;">Shortcuts: [← / →] Prev/Next page &nbsp;|&nbsp; [1 - 4] Switch view modes</p>
     </div>
+
+    <div class="card" style="grid-column: 1 / -1;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+        <h3>Downstream OCR Output (Kannada Text)</h3>
+        <span style="font-size: 12px; color: var(--dim);">
+          {% if page.ocr_text %}
+            {{ page.ocr_text | length }} characters recognized
+          {% else %}
+            Ready for OCR ingestion
+          {% endif %}
+        </span>
+      </div>
+      <pre id="ocr-text-display" style="background: #0b0c0e; border: 1px solid var(--line); border-radius: 6px; padding: 14px; font-family: monospace; font-size: 14px; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow-y: auto; line-height: 1.6; color: #e6e9ef;">{{ page.ocr_text if page.ocr_text else '(No text recognized or OCR pending)' }}</pre>
+    </div>
   </section>
 
   <script>
     (function() {
+      const sessionId = '{{ session_id }}';
+      const currentPage = {{ page_n }};
+      const totalPages = {{ total_pages }};
+
+      // Live streaming status poller
+      function checkStreamStatus() {
+        fetch('/session/' + sessionId + '/status')
+          .then(r => r.json())
+          .then(data => {
+            const nextBtn = document.getElementById('btn-next');
+            if (data.is_streaming && data.pending > 0) {
+              let badge = document.getElementById('live-stream-badge');
+              if (!badge) {
+                badge = document.createElement('span');
+                badge.id = 'live-stream-badge';
+                badge.style.cssText = 'color: var(--pre); font-size: 12px; margin-left: 12px; font-weight: 500;';
+                document.querySelector('header > div').appendChild(badge);
+              }
+              badge.textContent = '⚡ Streaming & OCR: Page ' + data.latest_done + ' of ' + data.total_pages + ' ready...';
+            } else {
+              const badge = document.getElementById('live-stream-badge');
+              if (badge) {
+                badge.textContent = '✓ All ' + data.total_pages + ' pages streamed & OCR ready';
+                badge.style.color = 'var(--keep)';
+              }
+            }
+          })
+          .catch(() => {});
+      }
+      setInterval(checkStreamStatus, 2500);
+      checkStreamStatus();
       const box = document.getElementById('compare-box');
       const modeButtons = document.querySelectorAll('.mode-btn');
       let blinkInterval = null;

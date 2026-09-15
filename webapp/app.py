@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 
@@ -25,6 +26,7 @@ from preprocessing.prepare_for_ocr import (
     get_pdf_page_count,
     prepare_document,
     prepare_page,
+    run_page_ocr,
 )
 from preprocessing.quality_gate import assess_page
 
@@ -36,6 +38,9 @@ OUTPUTS_DIR = BASE_DIR / "outputs"
 
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+_ACTIVE_STREAMS: dict[str, bool] = {}
+_STREAM_LOCK = threading.Lock()
 
 ALLOWED_EXTENSIONS = {
     ".pdf",
@@ -106,8 +111,8 @@ def _make_thumbnail(src_path: Path, thumb_path: Path, target_width: int = 240) -
     cv2.imwrite(str(thumb_path), thumb)
 
 
-def _process_single_page(session_id: str, page_n: int) -> dict:
-    """Extract and preprocess a single page on demand for a session."""
+def _process_single_page(session_id: str, page_n: int, run_ocr: bool = True) -> dict:
+    """Extract, preprocess, and run OCR on a single page for a session."""
     s_id = _validate_uuid(session_id)
     manifest = _load_manifest(s_id)
     if not manifest:
@@ -150,6 +155,8 @@ def _process_single_page(session_id: str, page_n: int) -> dict:
         page_index=page_n,
         force_ops=force_ops,
         source_label=str(upload_path),
+        run_ocr=run_ocr,
+        ocr_lang="kan",
     )
 
     thumb_path = thumbs_dir / out_filename
@@ -164,10 +171,47 @@ def _process_single_page(session_id: str, page_n: int) -> dict:
         "decision": pm.decision,
         "operations": pm.operations,
         "metrics": pm.metrics,
+        "ocr_text": pm.ocr_text,
     }
     manifest["pages"][page_n - 1] = updated_entry
     _save_manifest(s_id, manifest)
     return updated_entry
+
+
+def _stream_worker(session_id: str):
+    """Background worker that continuously preprocesses pending pages and dispatches to OCR."""
+    with _STREAM_LOCK:
+        if _ACTIVE_STREAMS.get(session_id):
+            return
+        _ACTIVE_STREAMS[session_id] = True
+
+    try:
+        while True:
+            manifest = _load_manifest(session_id)
+            if not manifest:
+                break
+            pending = [
+                p["page_index"]
+                for p in manifest.get("pages", [])
+                if p.get("decision") == "PENDING"
+            ]
+            if not pending:
+                break
+            next_page = pending[0]
+            try:
+                _process_single_page(session_id, next_page, run_ocr=True)
+            except Exception as err:
+                print(f"Background streaming error on page {next_page}: {err}")
+                break
+    finally:
+        with _STREAM_LOCK:
+            _ACTIVE_STREAMS[session_id] = False
+
+
+def _start_background_stream(session_id: str):
+    """Launch background daemon thread for sequential page-by-page preprocessing & OCR."""
+    t = threading.Thread(target=_stream_worker, args=(session_id,), daemon=True)
+    t.start()
 
 
 @app.route("/")
@@ -236,6 +280,8 @@ def upload():
             page_index=1,
             force_ops=force_ops,
             source_label=str(upload_path),
+            run_ocr=True,
+            ocr_lang="kan",
         )
         _make_thumbnail(p1_out, thumbs_dir / p1_out_filename, target_width=240)
 
@@ -249,10 +295,11 @@ def upload():
                 "decision": p1_entry.decision,
                 "operations": p1_entry.operations,
                 "metrics": p1_entry.metrics,
+                "ocr_text": p1_entry.ocr_text,
             }
         ]
 
-        # Remaining pages are initialized as PENDING and processed on demand
+        # Remaining pages are initialized as PENDING and streamed in background
         for idx in range(2, total_pages + 1):
             pages_list.append({
                 "page_index": idx,
@@ -263,6 +310,7 @@ def upload():
                 "decision": "PENDING",
                 "operations": [],
                 "metrics": {},
+                "ocr_text": "",
             })
 
         manifest_data = {
@@ -273,6 +321,9 @@ def upload():
         }
         _save_manifest(session_id, manifest_data)
 
+        # Start continuous background streaming: Page 1 is ready, Pages 2..N are processed & sent to OCR
+        _start_background_stream(session_id)
+
     else:
         # Single image input
         shutil.copy2(upload_path, raw_dir / "page_1.png")
@@ -282,13 +333,45 @@ def upload():
             dpi=300,
             force_ops=force_ops,
             verbose=False,
+            run_ocr=True,
+            ocr_lang="kan",
         )
         orig_manifest = _get_manifest_path(out_dir)
         std_manifest = out_dir / "manifest.json"
         if orig_manifest and orig_manifest.is_file() and orig_manifest != std_manifest:
             shutil.copy2(orig_manifest, std_manifest)
 
-    return redirect(url_for("gallery", session_id=session_id))
+    return redirect(url_for("page_viewer", session_id=session_id, page_n=1))
+
+
+@app.route("/session/<uuid:session_id>/status")
+def session_status(session_id):
+    """Return JSON status of the background streaming and OCR pipeline."""
+    s_id = str(session_id)
+    manifest = _load_manifest(s_id)
+    if not manifest:
+        abort(404)
+    pages = manifest.get("pages", [])
+    n_pre = sum(1 for p in pages if p.get("decision") == "PREPROCESS")
+    n_kept = sum(1 for p in pages if p.get("decision") == "KEEP")
+    n_pending = sum(1 for p in pages if p.get("decision") == "PENDING")
+    latest_done = 0
+    for p in pages:
+        if p.get("decision") != "PENDING":
+            latest_done = max(latest_done, p["page_index"])
+
+    with _STREAM_LOCK:
+        is_active = bool(_ACTIVE_STREAMS.get(s_id))
+
+    return {
+        "session_id": s_id,
+        "total_pages": len(pages),
+        "preprocessed": n_pre,
+        "kept": n_kept,
+        "pending": n_pending,
+        "latest_done": latest_done,
+        "is_streaming": is_active,
+    }
 
 
 @app.route("/session/<uuid:session_id>")
@@ -409,6 +492,11 @@ def rerun_page(session_id, page_n):
     if not cv2.imwrite(str(out_path), processed):
         abort(500, description="Failed to overwrite processed page image")
 
+    # Run OCR on updated processed image
+    ocr_text = run_page_ocr(out_path, lang="kan")
+    txt_path = out_path.with_suffix(".txt")
+    txt_path.write_text(ocr_text, encoding="utf-8")
+
     # Invalidate thumbnail cache so gallery updates
     thumb_path = OUTPUTS_DIR / s_id / "thumbs" / out_filename
     if thumb_path.is_file():
@@ -419,6 +507,7 @@ def rerun_page(session_id, page_n):
     page_entry["operations"] = ops
     page_entry["width"] = int(processed.shape[1])
     page_entry["height"] = int(processed.shape[0])
+    page_entry["ocr_text"] = ocr_text
     _save_manifest(s_id, manifest)
 
     return redirect(url_for("page_viewer", session_id=s_id, page_n=page_n))

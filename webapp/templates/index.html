@@ -85,6 +85,25 @@
         </a>
       {% endfor %}
     </main>
+
+    {% if n_pending and n_pending > 0 %}
+      <script>
+        (function() {
+          const sessionId = '{{ session_id }}';
+          let lastDone = {{ manifest.pages | length - n_pending }};
+          setInterval(() => {
+            fetch('/session/' + sessionId + '/status')
+              .then(r => r.json())
+              .then(data => {
+                if (data.latest_done > lastDone) {
+                  window.location.reload();
+                }
+              })
+              .catch(() => {});
+          }, 3000);
+        })();
+      </script>
+    {% endif %}
   {% endif %}
 </body>
 </html>

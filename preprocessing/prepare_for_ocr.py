@@ -47,9 +47,10 @@ class PageManifest:
     output: str
     width: int
     height: int
-    decision: str  # "KEEP" | "PREPROCESS"
+    decision: str  # "KEEP" | "PREPROCESS" | "PENDING"
     operations: list[str]
     metrics: dict  # keys: skew_deg, blur, contrast, illumination, noise
+    ocr_text: str = ""
 
 
 @dataclass
@@ -66,19 +67,54 @@ class DocManifest:
         return sum(1 for p in self.pages if p.decision == "KEEP")
 
 
+def run_page_ocr(image_path: str | Path, lang: str = "kan") -> str:
+    """
+    Run OCR (Tesseract) on a preprocessed page image and return recognized text.
+    Returns empty string if tesseract is not found or fails.
+    """
+    tess = shutil.which("tesseract")
+    if not tess:
+        return ""
+    img_p = Path(image_path)
+    if not img_p.is_file():
+        return ""
+    with tempfile.TemporaryDirectory(prefix="ocr_tess_") as td:
+        out_base = Path(td) / "out"
+        cmd = [
+            tess,
+            str(img_p),
+            str(out_base),
+            "-l",
+            lang,
+        ]
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        out_txt = Path(td) / "out.txt"
+        if out_txt.is_file():
+            return out_txt.read_text(encoding="utf-8", errors="replace").strip()
+    return ""
+
+
 def prepare_page(
     image_path: str | Path,
     output_path: str | Path,
     page_index: int,
     force_ops: list[str] | None = None,
     source_label: str | None = None,
+    run_ocr: bool = False,
+    ocr_lang: str = "kan",
 ) -> PageManifest:
     """
     Assess and prepare a single page for downstream OCR consumption.
 
     Loads grayscale image, determines needed operations via the quality gate
     (or force_ops override), conditionally executes preprocessing, writes the
-    output image, and returns the page manifest.
+    output image, optionally runs OCR immediately on the result, and returns
+    the page manifest.
     """
     src = Path(image_path)
     dst = Path(output_path)
@@ -114,6 +150,12 @@ def prepare_page(
         "noise": float(q.noise_score),
     }
 
+    ocr_text = ""
+    if run_ocr:
+        ocr_text = run_page_ocr(dst, lang=ocr_lang)
+        txt_path = dst.with_suffix(".txt")
+        txt_path.write_text(ocr_text, encoding="utf-8")
+
     return PageManifest(
         page_index=page_index,
         source=str(source_label or src),
@@ -123,6 +165,7 @@ def prepare_page(
         decision=decision,
         operations=ops,
         metrics=metrics,
+        ocr_text=ocr_text,
     )
 
 
@@ -235,19 +278,21 @@ def parse_page_selection(spec: str, total_pages: int) -> list[int]:
     return sorted(selected)
 
 
-def prepare_document(
+def stream_prepare_document(
     src: str | Path,
     out_dir: str | Path,
     dpi: int = 300,
     force_ops: list[str] | None = None,
-    verbose: bool = True,
     page_numbers: list[int] | None = None,
-) -> DocManifest:
+    run_ocr: bool = False,
+    ocr_lang: str = "kan",
+    callback: callable | None = None,
+):
     """
-    Process a PDF or single image into OCR-ready images and a JSON manifest.
-
-    For PDFs, processing is executed page-by-page to minimize memory and disk
-    footprint, supporting large multi-hundred-page books efficiently.
+    Pipelined streaming processor:
+    Yields each page as soon as it is preprocessed and optionally OCR'd,
+    allowing downstream OCR consumers to ingest page-by-page without waiting
+    for the rest of the document to finish.
     """
     src_path = Path(src)
     output_dir = Path(out_dir)
@@ -269,6 +314,11 @@ def prepare_document(
 
     pages: list[PageManifest] = []
 
+    def _sync_manifest():
+        doc_manifest = DocManifest(source=str(src_path), pages=pages)
+        manifest_json = json.dumps(asdict(doc_manifest), indent=2, ensure_ascii=False)
+        manifest_path.write_text(manifest_json, encoding="utf-8")
+
     if ext in PDF_EXTENSIONS:
         if shutil.which("pdftoppm") is None:
             raise RuntimeError(
@@ -286,10 +336,7 @@ def prepare_document(
         else:
             target_indices = list(range(1, total_doc_pages + 1))
 
-        total_pages = len(target_indices)
-        w = max(len(str(total_doc_pages)), 3)
-
-        for count_idx, idx in enumerate(target_indices, start=1):
+        for idx in target_indices:
             page_filename = f"{stem}_page-{idx:04d}.png"
             page_out_path = output_dir / page_filename
 
@@ -304,21 +351,16 @@ def prepare_document(
                     page_index=idx,
                     force_ops=force_ops,
                     source_label=str(src_path),
+                    run_ocr=run_ocr,
+                    ocr_lang=ocr_lang,
                 )
                 pages.append(manifest_entry)
+                _sync_manifest()
 
-            if verbose:
-                ops_str = (
-                    f"ops={','.join(manifest_entry.operations)}"
-                    if manifest_entry.operations
-                    else "ops=none"
-                )
-                print(
-                    f"[{count_idx:{w}d}/{total_pages:{w}d}] (p.{idx}) "
-                    f"{manifest_entry.decision:<10}  "
-                    f"{ops_str:<43} -> "
-                    f"{page_filename}"
-                )
+                if callback:
+                    callback(manifest_entry)
+
+                yield manifest_entry
 
     else:
         page_filename = f"{stem}_page-0001.png"
@@ -329,20 +371,70 @@ def prepare_document(
             page_index=1,
             force_ops=force_ops,
             source_label=str(src_path),
+            run_ocr=run_ocr,
+            ocr_lang=ocr_lang,
         )
         pages.append(manifest_entry)
-        total_pages = 1
+        _sync_manifest()
 
+        if callback:
+            callback(manifest_entry)
+
+        yield manifest_entry
+
+
+def prepare_document(
+    src: str | Path,
+    out_dir: str | Path,
+    dpi: int = 300,
+    force_ops: list[str] | None = None,
+    verbose: bool = True,
+    page_numbers: list[int] | None = None,
+    run_ocr: bool = False,
+    ocr_lang: str = "kan",
+    callback: callable | None = None,
+) -> DocManifest:
+    """
+    Process a PDF or single image into OCR-ready images and a JSON manifest.
+
+    Pages are processed one-by-one in a streaming fashion. If run_ocr is enabled,
+    OCR is dispatched on each page immediately upon preprocessing completion.
+    """
+    src_path = Path(src)
+    output_dir = Path(out_dir)
+    stem = src_path.stem
+    manifest_filename = f"{stem}_manifest.json"
+
+    pages: list[PageManifest] = []
+    total_doc_pages = get_pdf_page_count(src_path) if src_path.suffix.lower() in PDF_EXTENSIONS else 1
+    total_target = len(page_numbers) if page_numbers else total_doc_pages
+    w = max(len(str(total_doc_pages)), 3)
+
+    stream = stream_prepare_document(
+        src=src,
+        out_dir=out_dir,
+        dpi=dpi,
+        force_ops=force_ops,
+        page_numbers=page_numbers,
+        run_ocr=run_ocr,
+        ocr_lang=ocr_lang,
+        callback=callback,
+    )
+
+    for count_idx, entry in enumerate(stream, start=1):
+        pages.append(entry)
         if verbose:
             ops_str = (
-                f"ops={','.join(manifest_entry.operations)}"
-                if manifest_entry.operations
+                f"ops={','.join(entry.operations)}"
+                if entry.operations
                 else "ops=none"
             )
+            ocr_info = f" -> OCR ({len(entry.ocr_text)} chars)" if run_ocr else ""
             print(
-                f"[  1/  1] {manifest_entry.decision:<10}  "
-                f"{ops_str:<43} -> "
-                f"{page_filename}"
+                f"[{count_idx:{w}d}/{total_target:{w}d}] (p.{entry.page_index}) "
+                f"{entry.decision:<10}  "
+                f"{ops_str:<40} -> "
+                f"{entry.output}{ocr_info}"
             )
 
     doc_manifest = DocManifest(
@@ -350,17 +442,10 @@ def prepare_document(
         pages=pages,
     )
 
-    manifest_json = json.dumps(
-        asdict(doc_manifest),
-        indent=2,
-        ensure_ascii=False,
-    )
-    manifest_path.write_text(manifest_json, encoding="utf-8")
-
     if verbose:
         out_display = str(output_dir).rstrip("/") + "/"
         print(
-            f"wrote {total_pages} page(s) + {manifest_filename} to {out_display}"
+            f"wrote {len(pages)} page(s) + {manifest_filename} to {out_display}"
         )
         print(f"  preprocessed: {doc_manifest.n_preprocessed}")
         print(f"  kept original: {doc_manifest.n_kept}")
@@ -407,6 +492,17 @@ def main() -> None:
         help="Comma-separated operations to force (empty string forces KEEP)",
     )
     parser.add_argument(
+        "--ocr",
+        action="store_true",
+        help="Immediately run downstream OCR (Tesseract) on each page as soon as it is preprocessed",
+    )
+    parser.add_argument(
+        "--ocr-lang",
+        type=str,
+        default="kan",
+        help="Language code for OCR (default: 'kan')",
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -433,6 +529,8 @@ def main() -> None:
         force_ops=force_ops,
         verbose=not args.quiet,
         page_numbers=page_numbers,
+        run_ocr=args.ocr,
+        ocr_lang=args.ocr_lang,
     )
 
 
