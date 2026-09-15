@@ -86,28 +86,19 @@ def _save_manifest(session_id: str, data: dict) -> None:
 
 
 def _make_thumbnail(src_path: Path, thumb_path: Path, target_width: int = 240) -> None:
-    """Downscale processed page image for fast gallery rendering."""
+    """Downscale processed page image for fast gallery rendering using OpenCV."""
     thumb_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        from PIL import Image
-
-        with Image.open(src_path) as img:
-            ratio = target_width / float(img.width)
-            target_height = max(1, int(float(img.height) * ratio))
-            thumb = img.resize(
-                (target_width, target_height), Image.Resampling.LANCZOS
-            )
-            thumb.save(thumb_path)
-    except ImportError:
-        img = cv2.imread(str(src_path))
-        if img is None:
-            return
-        h, w = img.shape[:2]
-        target_height = max(1, int(h * (target_width / w)))
-        thumb = cv2.resize(
-            img, (target_width, target_height), interpolation=cv2.INTER_AREA
-        )
-        cv2.imwrite(str(thumb_path), thumb)
+    img = cv2.imread(str(src_path))
+    if img is None:
+        return
+    h, w = img.shape[:2]
+    if w == 0 or h == 0:
+        return
+    target_height = max(1, int(h * (target_width / w)))
+    thumb = cv2.resize(
+        img, (target_width, target_height), interpolation=cv2.INTER_AREA
+    )
+    cv2.imwrite(str(thumb_path), thumb)
 
 
 @app.route("/")
