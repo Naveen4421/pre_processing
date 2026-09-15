@@ -310,6 +310,8 @@ def rerun_page(session_id, page_n):
     # Update manifest entry and persist
     page_entry["decision"] = decision
     page_entry["operations"] = ops
+    page_entry["width"] = int(processed.shape[1])
+    page_entry["height"] = int(processed.shape[0])
     _save_manifest(s_id, manifest)
 
     return redirect(url_for("page_viewer", session_id=s_id, page_n=page_n))

@@ -153,9 +153,14 @@ def decide_operations(
     skew_angle: float,
     illumination_score: float,
     noise_score: float,
+    needs_crop: bool = False,
 ) -> list[str]:
 
     operations = []
+
+    # If camera capture includes foreign background (table, cloth), crop first
+    if needs_crop:
+        operations.append("crop")
 
     # Tuned thresholds for real Kannada document & book scans
     if abs(skew_angle) > 1.5:
@@ -204,6 +209,14 @@ def assess_page(
 
     height, width = gray.shape
 
+    # Detect if image is a camera photo containing non-document background
+    try:
+        from preprocessing.kannada_preprocess import find_document_quad
+        corners, ratio = find_document_quad(image)
+        needs_crop = bool(corners is not None and 0.20 <= ratio < 0.95)
+    except Exception:
+        needs_crop = False
+
     blur_score = calculate_blur_score(
         gray
     )
@@ -232,6 +245,7 @@ def assess_page(
         skew_angle=skew_angle,
         illumination_score=illumination_score,
         noise_score=noise_score,
+        needs_crop=needs_crop,
     )
 
     return PageQuality(

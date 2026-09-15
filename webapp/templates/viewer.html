@@ -55,10 +55,10 @@
       <div style="margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px;">
         <h3>A/B Testing: Re-run with Custom Ops</h3>
         <form method="POST" action="/session/{{ session_id }}/page/{{ page_n }}/rerun" class="rerun-form">
-          <input type="text" id="rerun-ops" name="ops" value="{{ page.operations | join(',') }}" placeholder="e.g. deskew,illumination,contrast">
+          <input type="text" id="rerun-ops" name="ops" value="{{ page.operations | join(',') }}" placeholder="e.g. crop,deskew,illumination,contrast,sharpen">
           <button type="submit">Re-run Page</button>
         </form>
-        <p class="help-text">Valid ops: deskew, illumination, denoise, contrast, sharpen. Leave blank to force KEEP original.</p>
+        <p class="help-text">Valid ops: crop, deskew, illumination, denoise, contrast, sharpen. Leave blank to force KEEP original.</p>
       </div>
     </div>
 

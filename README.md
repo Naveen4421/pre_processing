@@ -40,11 +40,12 @@ This project introduces a **Quality Gate Architecture**:
                       ▼                        ▼
              Preserve Original        Selective Transformations
              (Byte Passthrough)       (Fixed Safe Order)
-                                      1. deskew
-                                      2. illumination
-                                      3. denoise
-                                      4. contrast
-                                      5. sharpen
+                                      1. crop
+                                      2. deskew
+                                      3. illumination
+                                      4. denoise
+                                      5. contrast
+                                      6. sharpen
                       │                        │
                       └──────────────┬─────────┘
                                      ▼
@@ -55,13 +56,14 @@ This project introduces a **Quality Gate Architecture**:
 
 ### Why Operations Run in a Fixed Safe Order
 
-`OP_ORDER = ["deskew", "illumination", "denoise", "contrast", "sharpen"]`
+`OP_ORDER = ["crop", "deskew", "illumination", "denoise", "contrast", "sharpen"]`
 
-1. **`deskew` first**: Geometric orientation must be corrected before spatial filtering and intensity mapping.
-2. **`illumination` before `contrast`**: Large-scale background gradients and book-fold shadows must be flattened before local equalization; otherwise, CLAHE amplifies background unevenness into dark or blown-out patches.
-3. **`denoise` before `contrast`**: Paper and sensor grain must be smoothed (via an edge-preserving bilateral filter) before contrast stretching to prevent noise amplification.
-4. **`contrast`**: CLAHE improves local character contrast while guarding thin strokes.
-5. **`sharpen` last**: Unsharp masking must run at the very end; executing it earlier would accentuate high-frequency noise throughout prior stages.
+1. **`crop` first**: Non-document backgrounds (table surfaces, cloth, shadows, camera margins) must be excised before geometry correction and illumination normalization, ensuring subsequent filters only analyze the actual page content.
+2. **`deskew` second**: Geometric orientation must be corrected before spatial filtering and intensity mapping so that coordinate spaces and orientation are normalized.
+3. **`illumination` before `contrast`**: Large-scale background gradients and book-fold shadows must be flattened before local equalization; otherwise, CLAHE amplifies background unevenness into dark or blown-out patches.
+4. **`denoise` before `contrast`**: Paper and sensor grain must be smoothed (via an edge-preserving bilateral filter) before contrast stretching to prevent noise amplification.
+5. **`contrast`**: CLAHE improves local character contrast while guarding thin strokes.
+6. **`sharpen` last**: Unsharp masking must run at the very end; executing it earlier would accentuate high-frequency noise throughout prior stages.
 
 ---
 
@@ -71,11 +73,12 @@ The quality gate evaluates images using OpenCV and decides which corrective acti
 
 | Metric | Measurement Technique | Threshold Condition | Triggered Operation | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| **Skew** | Canny edges + Probabilistic Hough Lines (`HoughLinesP`) filtering $\pm 15^\circ$ | `abs(skew_angle) > 1.5°` | `deskew` | Rotates image around center with `INTER_CUBIC` and `BORDER_REPLICATE` keeping canvas size. |
-| **Illumination** | Downsampled Gaussian blur standard deviation | `illumination_score > 18.0` | `illumination` | Gaussian-division background normalization (`sigmaX=25`) to remove lighting gradients. |
+| **Boundary Crop** | Canny edges + morphological dilation + 4-point polygon approximation (`approxPolyDP`) | Detected document quad with $0.20 \le \text{area ratio} < 0.95$ | `crop` | Dynamically trims foreign background (table, cloth, shadows) and applies 4-point perspective rectification. Flatbed scans remain 100% untouched. |
+| **Skew** | Canny edges + Probabilistic Hough Lines (`HoughLinesP`) filtering $\pm 15^\circ$ | `abs(skew_angle) > 1.5°` | `deskew` | Rotates image around center with `INTER_CUBIC` and clean white border padding keeping canvas size. |
+| **Illumination** | Downsampled Gaussian blur standard deviation | `illumination_score > 18.0` | `illumination` | Gaussian-division background normalization (`sigmaX=35`) to remove lighting gradients. |
 | **Noise** | High-frequency residual mean (`cv2.absdiff` with $3\times3$ blur) | `noise_score > 8.0` | `denoise` | Bilateral filter (`d=7, sigma=35`) preserving character edges without destroying *matras*. |
-| **Blur** | Variance of the Laplacian (`cv2.Laplacian`) | `blur_score < 80.0` | `sharpen` | Unsharp mask (`sigma=1.0, amount=0.5`) to restore soft text without halo artifacts. |
-| **Contrast** | Grayscale intensity standard deviation | `contrast_score < 35.0` | `contrast` | CLAHE (`clipLimit=2.0, tileGridSize=(8,8)`) enhancing faint ink while avoiding stroke blowout. |
+| **Blur** | Variance of the Laplacian (`cv2.Laplacian`) | `blur_score < 600.0` | `sharpen` | Unsharp mask (`sigma=1.0, amount=0.8`) to restore soft text without halo artifacts. |
+| **Contrast** | Grayscale intensity standard deviation | `contrast_score < 35.0` | `contrast` | CLAHE (`clipLimit=2.5, tileGridSize=(8,8)`) enhancing faint ink while avoiding stroke blowout. |
 
 ---
 
@@ -332,7 +335,7 @@ else:
 ## Design Principles
 
 1. **Non-Destructive Grayscale Preservation**: Avoid premature binarization. Standard Otsu or Sauvola binarization can break delicate loops and subscript ligatures in Kannada. Grayscale images preserve the sub-pixel stroke anti-aliasing needed by modern neural OCR models.
-2. **Fixed Safe Pipeline Order**: Operations are executed strictly in geometry $\rightarrow$ illumination $\rightarrow$ denoise $\rightarrow$ contrast $\rightarrow$ sharpen order to prevent artifact cascades.
+2. **Fixed Safe Pipeline Order**: Operations are executed strictly in boundary crop $\rightarrow$ geometry (deskew) $\rightarrow$ illumination $\rightarrow$ denoise $\rightarrow$ contrast $\rightarrow$ sharpen order to prevent artifact cascades.
 3. **Reproducibility & Traceability**: The manifest records exact numerical metrics and transformation decisions for every page, enabling automated quality auditing and retraining data generation.
 
 ---

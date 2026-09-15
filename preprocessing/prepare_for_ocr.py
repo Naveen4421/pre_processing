@@ -105,7 +105,7 @@ def prepare_page(
     if not cv2.imwrite(str(dst), processed):
         raise RuntimeError(f"Could not write output image: {dst}")
 
-    height, width = image.shape[:2]
+    height, width = processed.shape[:2]
     metrics = {
         "skew_deg": float(q.skew_angle),
         "blur": float(q.blur_score),

@@ -6,21 +6,25 @@ specifically for Indic scripts like Kannada, where character stroke integrity,
 subscript consonants (ottu/vatlu), and vowel signs (matras) must be preserved.
 
 Transformation Pipeline Order:
-    OP_ORDER = ["deskew", "illumination", "denoise", "contrast", "sharpen"]
+    OP_ORDER = ["crop", "deskew", "illumination", "denoise", "contrast", "sharpen"]
 
 Why this specific execution order is required:
-1. deskew first:
+1. crop first:
+   Non-document backgrounds (table surfaces, cloth, shadows, camera margins)
+   must be excised before geometry correction and illumination normalization,
+   ensuring subsequent filters only analyze the actual page content.
+2. deskew second:
    Geometric alignment must occur before spatial filtering or intensity
    transformations so that coordinate spaces and orientation are normalized.
-2. illumination before contrast:
+3. illumination before contrast:
    Large-scale background lighting gradients and book-fold shadows must be
    flattened before local histogram equalization; otherwise, CLAHE amplifies
    the background illumination unevenness into dark/blown-out regions.
-3. denoise before contrast:
+4. denoise before contrast:
    High-frequency scanner and paper grain must be smoothed (using an
    edge-preserving bilateral filter) prior to contrast enhancement; otherwise,
    CLAHE intensifies background noise.
-4. sharpen last:
+5. sharpen last:
    High-frequency edge enhancement (unsharp masking) must run at the very end;
    running it earlier would amplify noise and contrast artifacts across
    subsequent stages.
@@ -31,7 +35,14 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-OP_ORDER: list[str] = ["deskew", "illumination", "denoise", "contrast", "sharpen"]
+OP_ORDER: list[str] = [
+    "crop",
+    "deskew",
+    "illumination",
+    "denoise",
+    "contrast",
+    "sharpen",
+]
 
 
 def _to_gray(image: np.ndarray) -> np.ndarray:
@@ -39,6 +50,115 @@ def _to_gray(image: np.ndarray) -> np.ndarray:
     if len(image.shape) == 3:
         return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     return image.copy()
+
+
+def order_points(pts: np.ndarray) -> np.ndarray:
+    """Order 4 polygon coordinates: top-left, top-right, bottom-right, bottom-left."""
+    rect = np.zeros((4, 2), dtype=np.float32)
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    return rect
+
+
+def find_document_quad(image: np.ndarray) -> tuple[np.ndarray | None, float]:
+    """
+    Detect the 4-corner polygon of a document page in a camera photo or scan.
+
+    Returns (corners, area_ratio) or (None, 0.0) if no external background is found.
+    Area ratio is the fraction of total frame occupied by the detected document.
+    """
+    if image is None or image.size == 0:
+        return None, 0.0
+
+    h, w = image.shape[:2]
+    if h < 100 or w < 100:
+        return None, 0.0
+
+    gray = _to_gray(image)
+    total_area = float(h * w)
+
+    scale = 800.0 / max(h, w)
+    if scale < 1.0:
+        small = cv2.resize(gray, (0, 0), fx=scale, fy=scale)
+    else:
+        small = gray.copy()
+        scale = 1.0
+
+    sh, sw = small.shape
+    small_area = float(sh * sw)
+
+    blurred = cv2.GaussianBlur(small, (9, 9), 0)
+    edges = cv2.Canny(blurred, 30, 100)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    dilated = cv2.dilate(edges, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(dilated, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < 0.20 * small_area:
+            break
+        # If candidate already covers >= 95% of the image, the frame is already the document
+        if area >= 0.95 * small_area:
+            continue
+
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+        if len(approx) == 4:
+            corners = (approx / scale).reshape(4, 2)
+            area_ratio = (area / scale**2) / total_area
+            return corners, area_ratio
+
+    return None, 0.0
+
+
+def crop(image: np.ndarray) -> np.ndarray:
+    """
+    Dynamically detect and crop the book page boundary, trimming external
+    backgrounds (tables, cloth, scanner margins) using perspective correction.
+
+    Safety: If no distinct external background is found, returns a copy of
+    the original image untouched (no-op).
+    """
+    corners, ratio = find_document_quad(image)
+    if corners is None or ratio >= 0.95 or ratio < 0.20:
+        return image.copy()
+
+    rect = order_points(corners.astype(np.float32))
+    tl, tr, br, bl = rect
+
+    # Calculate width of new flattened document
+    width_a = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
+    width_b = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
+    max_width = max(int(width_a), int(width_b))
+
+    # Calculate height of new flattened document
+    height_a = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
+    height_b = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
+    max_height = max(int(height_a), int(height_b))
+
+    if max_width < 50 or max_height < 50:
+        return image.copy()
+
+    dst = np.array(
+        [
+            [0, 0],
+            [max_width - 1, 0],
+            [max_width - 1, max_height - 1],
+            [0, max_height - 1],
+        ],
+        dtype=np.float32,
+    )
+
+    m = cv2.getPerspectiveTransform(rect, dst)
+    return cv2.warpPerspective(image, m, (max_width, max_height))
 
 
 def deskew(image: np.ndarray, angle: float) -> np.ndarray:
@@ -151,7 +271,9 @@ def preprocess_page(
         if op not in operations:
             continue
 
-        if op == "deskew":
+        if op == "crop":
+            result = crop(result)
+        elif op == "deskew":
             result = deskew(result, skew_angle)
         elif op == "illumination":
             result = illumination(result)

@@ -23,7 +23,7 @@
     <form action="/upload" method="POST" enctype="multipart/form-data">
       <div class="form-row">
         <input type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.pnm" required>
-        <input type="text" name="force_ops" placeholder="Force ops (e.g. deskew,contrast) or leave blank for Quality Gate">
+        <input type="text" name="force_ops" placeholder="Force ops (e.g. crop,deskew,contrast) or leave blank for Quality Gate">
         <button type="submit">Run Preprocessing</button>
       </div>
       <p class="help-text">Supported: PDF, PNG, JPG, JPEG, TIF, TIFF, BMP, PNM. Leave 'Force ops' empty to use the automated quality gate.</p>
