@@ -46,6 +46,7 @@ def deskew(image: np.ndarray, angle: float) -> np.ndarray:
     Rotate image by `angle` degrees around its center while keeping canvas size.
 
     Preserves color channels if provided (operates on 2D or 3D arrays).
+    Uses clean white border padding to prevent dark margin smears.
     No-op if abs(angle) < 0.01 degrees.
     """
     if abs(angle) < 0.01:
@@ -54,17 +55,19 @@ def deskew(image: np.ndarray, angle: float) -> np.ndarray:
     height, width = image.shape[:2]
     center = (width / 2.0, height / 2.0)
     matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    border_val = (255, 255, 255) if len(image.shape) == 3 else 255
 
     return cv2.warpAffine(
         image,
         matrix,
         (width, height),
         flags=cv2.INTER_CUBIC,
-        borderMode=cv2.BORDER_REPLICATE,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=border_val,
     )
 
 
-def illumination(image: np.ndarray, sigma: float = 25.0) -> np.ndarray:
+def illumination(image: np.ndarray, sigma: float = 35.0) -> np.ndarray:
     """
     Gaussian-division background illumination normalization.
 
@@ -99,7 +102,7 @@ def denoise(image: np.ndarray, strength: int = 7) -> np.ndarray:
     )
 
 
-def contrast(image: np.ndarray, clip: float = 2.0, tiles: int = 8) -> np.ndarray:
+def contrast(image: np.ndarray, clip: float = 2.5, tiles: int = 8) -> np.ndarray:
     """
     Contrast Limited Adaptive Histogram Equalization (CLAHE).
 
@@ -111,7 +114,7 @@ def contrast(image: np.ndarray, clip: float = 2.0, tiles: int = 8) -> np.ndarray
     return clahe.apply(gray)
 
 
-def sharpen(image: np.ndarray, amount: float = 0.5) -> np.ndarray:
+def sharpen(image: np.ndarray, amount: float = 0.8) -> np.ndarray:
     """
     Unsharp mask sharpening.
 
@@ -122,6 +125,7 @@ def sharpen(image: np.ndarray, amount: float = 0.5) -> np.ndarray:
     gray = _to_gray(image)
     blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
     return cv2.addWeighted(gray, 1.0 + amount, blur, -amount, 0)
+
 
 
 def preprocess_page(

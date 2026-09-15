@@ -157,24 +157,27 @@ def decide_operations(
 
     operations = []
 
-    # These are INITIAL thresholds.
-    # We will tune them using your real
-    # Kannada book pages.
-
+    # Tuned thresholds for real Kannada document & book scans
     if abs(skew_angle) > 1.5:
         operations.append("deskew")
 
     if illumination_score > 18:
         operations.append("illumination")
+        # Illumination division normalizes lighting but requires contrast
+        # enhancement to restore deep character ink density
+        if "contrast" not in operations:
+            operations.append("contrast")
 
     if noise_score > 8:
         operations.append("denoise")
 
-    if blur_score < 80:
+    # Document text scans with blur_score < 600 exhibit optical softness/blur
+    if blur_score < 600:
         operations.append("sharpen")
 
     if contrast_score < 35:
-        operations.append("contrast")
+        if "contrast" not in operations:
+            operations.append("contrast")
 
     return operations
 
