@@ -20,7 +20,12 @@ from flask import Flask, abort, redirect, render_template, request, send_file, u
 import numpy as np
 
 from preprocessing.kannada_preprocess import preprocess_page
-from preprocessing.prepare_for_ocr import prepare_document
+from preprocessing.prepare_for_ocr import (
+    extract_pdf_page,
+    get_pdf_page_count,
+    prepare_document,
+    prepare_page,
+)
 from preprocessing.quality_gate import assess_page
 
 app = Flask(__name__)
@@ -101,6 +106,70 @@ def _make_thumbnail(src_path: Path, thumb_path: Path, target_width: int = 240) -
     cv2.imwrite(str(thumb_path), thumb)
 
 
+def _process_single_page(session_id: str, page_n: int) -> dict:
+    """Extract and preprocess a single page on demand for a session."""
+    s_id = _validate_uuid(session_id)
+    manifest = _load_manifest(s_id)
+    if not manifest:
+        abort(404, description="Session manifest not found")
+
+    pages = manifest.get("pages", [])
+    if page_n < 1 or page_n > len(pages):
+        abort(404, description="Page index out of bounds")
+
+    upload_dir = UPLOADS_DIR / s_id
+    out_dir = OUTPUTS_DIR / s_id
+    raw_dir = out_dir / "raw"
+    thumbs_dir = out_dir / "thumbs"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+
+    page_entry = pages[page_n - 1]
+    raw_path = raw_dir / f"page_{page_n}.png"
+
+    # Find the uploaded source file
+    upload_files = list(upload_dir.iterdir())
+    if not upload_files:
+        abort(500, description="Original upload file missing")
+    upload_path = upload_files[0]
+    ext = upload_path.suffix.lower()
+
+    if not raw_path.is_file():
+        if ext == ".pdf":
+            extract_pdf_page(upload_path, page_n, raw_path, dpi=300)
+        else:
+            shutil.copy2(upload_path, raw_path)
+
+    out_filename = page_entry.get("output") or f"{upload_path.stem}_page-{page_n:04d}.png"
+    out_path = out_dir / out_filename
+
+    force_ops = manifest.get("force_ops")
+    pm = prepare_page(
+        image_path=raw_path,
+        output_path=out_path,
+        page_index=page_n,
+        force_ops=force_ops,
+        source_label=str(upload_path),
+    )
+
+    thumb_path = thumbs_dir / out_filename
+    _make_thumbnail(out_path, thumb_path, target_width=240)
+
+    updated_entry = {
+        "page_index": pm.page_index,
+        "source": pm.source,
+        "output": pm.output,
+        "width": pm.width,
+        "height": pm.height,
+        "decision": pm.decision,
+        "operations": pm.operations,
+        "metrics": pm.metrics,
+    }
+    manifest["pages"][page_n - 1] = updated_entry
+    _save_manifest(s_id, manifest)
+    return updated_entry
+
+
 @app.route("/")
 def index():
     """Render landing page with upload form."""
@@ -109,7 +178,7 @@ def index():
 
 @app.route("/upload", methods=["POST"])
 def upload():
-    """Handle document upload and initiate preprocessing pipeline."""
+    """Handle document upload with fast 1-page-at-a-time streaming for PDFs."""
     if "file" not in request.files:
         abort(400, description="No file uploaded")
 
@@ -129,10 +198,12 @@ def upload():
     upload_dir = UPLOADS_DIR / session_id
     out_dir = OUTPUTS_DIR / session_id
     raw_dir = out_dir / "raw"
+    thumbs_dir = out_dir / "thumbs"
 
     upload_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
 
     upload_path = upload_dir / filename
     uploaded_file.save(str(upload_path))
@@ -145,57 +216,77 @@ def upload():
         else None
     )
 
-    # Save raw page images into <outputs>/<uuid>/raw/ so they remain available
-    # for side-by-side comparison in the viewer.
-    # For PDFs, invoke pdftoppm directly into raw/ before calling prepare_document.
-    # This uses two subprocess runs but avoids modifying prepare_document.
     if ext == ".pdf":
         if shutil.which("pdftoppm") is None:
             abort(
                 500,
                 description="pdftoppm not found. Please install poppler-utils.",
             )
-        subprocess.run(
-            [
-                "pdftoppm",
-                "-png",
-                "-r",
-                "300",
-                str(upload_path),
-                str(raw_dir / "page"),
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+        total_pages = get_pdf_page_count(upload_path)
+        stem = upload_path.stem
+
+        # Extract & prepare Page 1 immediately for instant preview (< 0.5s)
+        p1_raw = raw_dir / "page_1.png"
+        extract_pdf_page(upload_path, 1, p1_raw, dpi=300)
+        p1_out_filename = f"{stem}_page-0001.png"
+        p1_out = out_dir / p1_out_filename
+        p1_entry = prepare_page(
+            image_path=p1_raw,
+            output_path=p1_out,
+            page_index=1,
+            force_ops=force_ops,
+            source_label=str(upload_path),
         )
-        raw_files = sorted(
-            raw_dir.glob("*.png"),
-            key=lambda p: int(p.stem.split("-")[-1])
-            if p.stem.split("-")[-1].isdigit()
-            else p.stem,
-        )
-        for idx, rf in enumerate(raw_files, start=1):
-            target = raw_dir / f"page_{idx}.png"
-            if rf != target:
-                rf.rename(target)
+        _make_thumbnail(p1_out, thumbs_dir / p1_out_filename, target_width=240)
+
+        pages_list = [
+            {
+                "page_index": p1_entry.page_index,
+                "source": p1_entry.source,
+                "output": p1_entry.output,
+                "width": p1_entry.width,
+                "height": p1_entry.height,
+                "decision": p1_entry.decision,
+                "operations": p1_entry.operations,
+                "metrics": p1_entry.metrics,
+            }
+        ]
+
+        # Remaining pages are initialized as PENDING and processed on demand
+        for idx in range(2, total_pages + 1):
+            pages_list.append({
+                "page_index": idx,
+                "source": str(upload_path),
+                "output": f"{stem}_page-{idx:04d}.png",
+                "width": 0,
+                "height": 0,
+                "decision": "PENDING",
+                "operations": [],
+                "metrics": {},
+            })
+
+        manifest_data = {
+            "source": str(upload_path),
+            "total_pages": total_pages,
+            "force_ops": force_ops,
+            "pages": pages_list,
+        }
+        _save_manifest(session_id, manifest_data)
+
     else:
-        # For single image input, save directly as raw/page_1.png
+        # Single image input
         shutil.copy2(upload_path, raw_dir / "page_1.png")
-
-    # Run the core preprocessing pipeline
-    prepare_document(
-        src=upload_path,
-        out_dir=out_dir,
-        dpi=300,
-        force_ops=force_ops,
-        verbose=False,
-    )
-
-    # Ensure standardized manifest.json exists in session output folder
-    orig_manifest = _get_manifest_path(out_dir)
-    std_manifest = out_dir / "manifest.json"
-    if orig_manifest and orig_manifest.is_file() and orig_manifest != std_manifest:
-        shutil.copy2(orig_manifest, std_manifest)
+        prepare_document(
+            src=upload_path,
+            out_dir=out_dir,
+            dpi=300,
+            force_ops=force_ops,
+            verbose=False,
+        )
+        orig_manifest = _get_manifest_path(out_dir)
+        std_manifest = out_dir / "manifest.json"
+        if orig_manifest and orig_manifest.is_file() and orig_manifest != std_manifest:
+            shutil.copy2(orig_manifest, std_manifest)
 
     return redirect(url_for("gallery", session_id=session_id))
 
@@ -214,6 +305,9 @@ def gallery(session_id):
     n_kept = sum(
         1 for p in manifest.get("pages", []) if p.get("decision") == "KEEP"
     )
+    n_pending = sum(
+        1 for p in manifest.get("pages", []) if p.get("decision") == "PENDING"
+    )
 
     return render_template(
         "index.html",
@@ -221,12 +315,27 @@ def gallery(session_id):
         manifest=manifest,
         n_preprocessed=n_preprocessed,
         n_kept=n_kept,
+        n_pending=n_pending,
     )
+
+
+@app.route("/session/<uuid:session_id>/process_next")
+def process_next(session_id):
+    """Process the next pending page and open it in the viewer."""
+    s_id = str(session_id)
+    manifest = _load_manifest(s_id)
+    if not manifest:
+        abort(404)
+    for p in manifest.get("pages", []):
+        if p.get("decision") == "PENDING":
+            _process_single_page(s_id, p["page_index"])
+            return redirect(url_for("page_viewer", session_id=s_id, page_n=p["page_index"]))
+    return redirect(url_for("gallery", session_id=s_id))
 
 
 @app.route("/session/<uuid:session_id>/page/<int:page_n>")
 def page_viewer(session_id, page_n):
-    """Render per-page side-by-side inspector with comparison modes and A/B rerun form."""
+    """Render per-page side-by-side inspector with on-demand single page processing."""
     s_id = str(session_id)
     manifest = _load_manifest(s_id)
     if not manifest:
@@ -237,12 +346,17 @@ def page_viewer(session_id, page_n):
     if page_n < 1 or page_n > total_pages:
         abort(404, description="Page index out of bounds")
 
-    page = pages[page_n - 1]
+    page_entry = pages[page_n - 1]
+    # If the page has not been processed yet, process it on-demand in <0.5s
+    if page_entry.get("decision") == "PENDING" or not (OUTPUTS_DIR / s_id / "raw" / f"page_{page_n}.png").is_file():
+        page_entry = _process_single_page(s_id, page_n)
+        manifest = _load_manifest(s_id)
+
     return render_template(
         "viewer.html",
         session_id=s_id,
         manifest=manifest,
-        page=page,
+        page=page_entry,
         page_n=page_n,
         total_pages=total_pages,
         cache_bust=int(time.time()),
@@ -265,10 +379,12 @@ def rerun_page(session_id, page_n):
     ops_str = request.form.get("ops", "")
     ops = [x.strip() for x in ops_str.split(",") if x.strip()]
 
-    # Load original raw page image
+    # Load original raw page image (extract if pending)
     raw_path = OUTPUTS_DIR / s_id / "raw" / f"page_{page_n}.png"
     if not raw_path.is_file():
-        abort(404, description="Raw page image not found")
+        _process_single_page(s_id, page_n)
+        manifest = _load_manifest(s_id)
+        page_entry = manifest["pages"][page_n - 1]
 
     raw_img = cv2.imread(str(raw_path), cv2.IMREAD_GRAYSCALE)
     if raw_img is None:
@@ -317,6 +433,8 @@ def get_raw_image(session_id, page_n):
         abort(404)
     raw_path = OUTPUTS_DIR / s_id / "raw" / f"page_{page_n}.png"
     if not raw_path.is_file():
+        _process_single_page(s_id, page_n)
+    if not raw_path.is_file():
         abort(404)
     return send_file(raw_path, mimetype="image/png")
 
@@ -331,6 +449,9 @@ def get_processed_image(session_id, page_n):
     page_entry = manifest["pages"][page_n - 1]
     out_filename = Path(page_entry["output"]).name
     proc_path = OUTPUTS_DIR / s_id / out_filename
+    if not proc_path.is_file() or page_entry.get("decision") == "PENDING":
+        page_entry = _process_single_page(s_id, page_n)
+        proc_path = OUTPUTS_DIR / s_id / out_filename
     if not proc_path.is_file():
         abort(404)
     return send_file(proc_path, mimetype="image/png")
@@ -344,6 +465,8 @@ def get_thumbnail(session_id, page_n):
     if not manifest or page_n < 1 or page_n > len(manifest.get("pages", [])):
         abort(404)
     page_entry = manifest["pages"][page_n - 1]
+    if page_entry.get("decision") == "PENDING":
+        abort(404)  # UI renders pending card placeholder instead of loading image
     out_filename = Path(page_entry["output"]).name
     proc_path = OUTPUTS_DIR / s_id / out_filename
     if not proc_path.is_file():

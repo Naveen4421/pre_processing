@@ -155,7 +155,8 @@ Open **`http://127.0.0.1:5000`** in your browser.
 
 #### Key Features:
 - **Upload Flow**: Supports PDF books or individual images (`.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`, `.bmp`, `.pnm`) with optional operation overrides.
-- **Gallery Grid**: Displays processed page thumbnails overlaid with **`KEEP`** (green) or **`PREPROCESS`** (amber) badges along with operation lists.
+- **Instant PDF Streaming**: Multi-hundred page PDF books ingest in <1 second. Page 1 is ready immediately, and subsequent pages are rendered and preprocessed on-demand as you browse.
+- **Gallery Grid & Page Jumper**: Displays page cards with live `KEEP`, `PREPROCESS`, and `PENDING` statuses; jump directly to any page or click **Process Next Page** to walk through pages sequentially.
 - **Multi-Mode Inspector**:
   - `[1] Side-by-Side`: Default side-by-side layout of raw vs. processed pages.
   - `[2] Overlay`: Absolutely positioned processed image over the raw image at 50% opacity.
@@ -172,8 +173,14 @@ Open **`http://127.0.0.1:5000`** in your browser.
 Prepares a PDF document or single image for downstream OCR engines (such as Tesseract, PaddleOCR, or custom models):
 
 ```bash
-# Process a PDF document at 300 DPI
+# Process a PDF document at 300 DPI (page-by-page streaming)
 python -m preprocessing.prepare_for_ocr book.pdf output/book/ --dpi 300
+
+# Process only a single page from a large multi-page PDF
+python -m preprocessing.prepare_for_ocr book.pdf output/book/ --page 1
+
+# Process a specific page range or selection (e.g. pages 1 to 5, or 1,3,5)
+python -m preprocessing.prepare_for_ocr book.pdf output/book/ --pages 1-5
 
 # Process a single image
 python -m preprocessing.prepare_for_ocr input/page001.png output/page001/

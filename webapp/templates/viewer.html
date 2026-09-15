@@ -19,6 +19,10 @@
       {% if page_n < total_pages %}
         <a href="/session/{{ session_id }}/page/{{ page_n + 1 }}" class="btn btn-secondary" id="btn-next">Next →</a>
       {% endif %}
+      <form class="page-jump-form" onsubmit="event.preventDefault(); const p = document.getElementById('viewer-jump-p').value; if (p) window.location.href='/session/{{ session_id }}/page/' + p;">
+        <input type="number" id="viewer-jump-p" min="1" max="{{ total_pages }}" placeholder="p#" required>
+        <button type="submit" class="btn btn-secondary">Go</button>
+      </form>
       <span style="border-left: 1px solid var(--line); height: 24px; margin: 0 4px;"></span>
       <button type="button" class="btn btn-secondary mode-btn active" data-mode="side">1: Side-by-Side</button>
       <button type="button" class="btn btn-secondary mode-btn" data-mode="overlay">2: Overlay</button>

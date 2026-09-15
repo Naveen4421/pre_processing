@@ -38,9 +38,19 @@
         <span style="margin-left: 14px; font-weight: 600;">
           <span style="color: var(--pre);">{{ n_preprocessed }} preprocessed</span> /
           <span style="color: var(--keep);">{{ n_kept }} kept original</span>
+          {% if n_pending and n_pending > 0 %}
+            / <span style="color: var(--dim);">{{ n_pending }} pending</span>
+          {% endif %}
         </span>
       </div>
-      <div>
+      <div style="display: flex; gap: 10px; align-items: center;">
+        {% if n_pending and n_pending > 0 %}
+          <a href="/session/{{ session_id }}/process_next" class="btn">Process Next Page →</a>
+        {% endif %}
+        <form class="page-jump-form" onsubmit="event.preventDefault(); const p = document.getElementById('jump-p').value; if (p) window.location.href='/session/{{ session_id }}/page/' + p;">
+          <input type="number" id="jump-p" min="1" max="{{ manifest.pages | length }}" placeholder="Page #" required>
+          <button type="submit" class="btn btn-secondary">Go</button>
+        </form>
         <a href="/session/{{ session_id }}/manifest.json" class="btn btn-secondary" download>Download manifest.json</a>
       </div>
     </section>
@@ -49,14 +59,28 @@
       {% for page in manifest.pages %}
         <a href="/session/{{ session_id }}/page/{{ page.page_index }}" class="thumb-card">
           <div class="thumb-wrap">
-            <img src="/session/{{ session_id }}/img/thumb/{{ page.page_index }}" alt="Page {{ page.page_index }}" loading="lazy">
-            <span class="badge thumb-badge {{ 'badge-keep' if page.decision == 'KEEP' else 'badge-pre' }}">
-              {{ page.decision }}
-            </span>
+            {% if page.decision == 'PENDING' %}
+              <div class="pending-placeholder">
+                <span class="pending-icon">📄</span>
+                <span style="font-size: 11px; color: var(--dim);">Click to process & view</span>
+              </div>
+              <span class="badge thumb-badge badge-pending">PENDING</span>
+            {% else %}
+              <img src="/session/{{ session_id }}/img/thumb/{{ page.page_index }}" alt="Page {{ page.page_index }}" loading="lazy">
+              <span class="badge thumb-badge {{ 'badge-keep' if page.decision == 'KEEP' else 'badge-pre' }}">
+                {{ page.decision }}
+              </span>
+            {% endif %}
           </div>
           <div class="thumb-info">
             <div class="filename">p.{{ page.page_index }}: {{ page.output }}</div>
-            <div class="ops">ops={{ page.operations | join(',') if page.operations else 'none' }}</div>
+            <div class="ops">
+              {% if page.decision == 'PENDING' %}
+                <span style="color: var(--dim);">Unprocessed (click to run)</span>
+              {% else %}
+                ops={{ page.operations | join(',') if page.operations else 'none' }}
+              {% endif %}
+            </div>
           </div>
         </a>
       {% endfor %}
